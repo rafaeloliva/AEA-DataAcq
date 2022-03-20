@@ -1,0 +1,239 @@
+'CR1000 Series Datalogger
+'Firmware Campus UNPA-UARG 
+'Based on Mods R.Oliva 14-10-2019 - Add UNPALOGO.jpg
+'         25-10-2019 - Add Modbus TCP test access
+' Campus Uarg-Eolico Eolux 1200-24, 200Wp Paneles Solartec
+'    Bat 4x Trojan L16G
+'v1- 05.11.2019 Add Channels - Initial
+'    SE3 - Vbat
+'    SE4 - Iae
+'    SE5 - I_fv
+
+' 1. Declare Constants, Variables and Units
+' 1.a)  Analog Sensor Reading Constants
+'       In general EU_xx = V_xx*G_xx + K_xx
+' 1.a.1) EU_WDIR to be added
+' 1.a.2) EU_TEMP to be added
+' 1.a.3) EU_VBat  = VBat_In*G_Vbat_IN+K_Vbat_IN
+'     SE3  Vin_Iae Vbat channel for 24V 
+Const G_Vbat_IN = 8.00      ' Gain SE3 VinIae Typical - to be calibrated
+Const K_Vbat_IN = 0.0       ' CalibOffset SE3 Reading
+' 1.a.4) EU_Iae_In  = VIae_In*G_Iae_In+K__Iae_In
+'    SE4  ACS755 to Vin_Iae IAE channel for ACS755
+Const G_Iae_In = 16.938  ' Gain SE4 Use SISMRG Calibration ACS755-U050 09-2014
+Const K_Iae_In = -9.9919 ' CalibOffset SE4 Reading 3.9.2014
+' 1.a.5) EU_IFV_In  = VIFV_In*G_IFV_IN+K_FV_IN
+'    SE5 ACS713 SJ24 con ELC020A 
+Const G_IFV_IN = 5.5265904     ' Gain SE5 Reading, Calib SJ24 5.11.19 ver XLS
+Const K_IFV_IN = -2.8275081    ' Calib Offset SE5 Reading Work_LyR/2019
+
+Dim Commands As String * 200 
+Public Time(9), RefTemp
+Public BattV  
+Public Minutes As String, Seconds As String, Temperature As String 
+
+' 1.b) Sensor Reading Analog Variables (Float32)
+'Public VWDIR        ' SE1 Reading, VAne NRG200P
+'Public Frec_NRG     ' P1 low voltage Freq Reading, NRG Max#40C
+Public VBat_In       ' SE3 Reading, 0-5V Divider VinIae board
+Public VIae_In       ' SE4 Reading, 0.6-5V ACS755 0-50A HallEf Sensor
+Public VIFV_In       ' SE5 Reading, 0.6-5V ACS713 PV current 0-20A
+'Public VIae_DC      ' SE6 Reading, YHDC TDAH-20 1-5V, 0-20A dc
+'Public VV_HV_DC     ' SE6 Reading, YHDC TDVH-600 1-5V, 0-600V dc
+
+' 1.c) E.U. (Engineering Units) holders for Analog Variables (Float32)
+'Public EU_VWDIR     ' WDIR Reading, VAne NRG200P 0-359 deg
+'Public EU_WSpd      ' WSpeed Reading, Anem NRG#40C 0-70m/s
+Public EU_VBat       ' VBat in EU 0-30Vdc input
+Public EU_Iae_In     ' IAer in 0-50A units
+Public EU_IFV_In     ' I_PV in 0-20A units
+
+
+' Modbus Slave Tables 25.10.19
+Public MBReg(16) As Float
+Public MBCoil(2) As Boolean
+
+' Added 24.10.2019 v1C
+Alias MBReg(1) = VelocVien   ' MB_Ch1 WSpeed Reading, Anem NRG#40C 0-70m/s
+Alias MBReg(2) = DirecVien   ' MB_Ch2 WDIR Reading, VAne NRG200P 0-359 deg
+Alias MBReg(3) = VBat_In     ' MB_Ch3 Vbat in 0-28V 
+Alias MBReg(4) = VIae_In     ' MB_Ch4 Corriente Aerogen 0-50A
+Alias MBReg(5) = I_FV_In     ' MB_Ch5 Corriente FV 0-20A
+Alias MBReg(6) = Not_impl    ' MB_Ch6 V_HVdc DC Link [V] 
+Alias MBReg(7) = Not_impl1    ' MB_Ch7 I_DC DC Link [A] 
+Alias MBReg(8) = Not_impl2    ' MB_Ch8 VAC Salida de Inversor  [Vrms]
+Alias MBReg(9) = I_AC220     ' MB_Ch9 IAC Salida de Inversor  [Arms]
+Alias MBReg(10) = P_AC220    ' MB_Ch10 PAC activa Salida de Inversor[ kW]
+Alias MBReg(11) = f_ACred    ' MB_Ch11 frecuencia Red Inversor[ Hz]
+Alias MBReg(12) = Status     ' MB_12 No implementado - Conex a red
+Alias MBReg(13) = Vbat12     ' MB_Ch13 Bateria 12V Voltaje
+Alias MBReg(14) = TempInt    ' MB_Ch14 Temperature interior logger
+
+ 
+DataTable (CR1Temp,True,-1) 
+  DataInterval (0,1,Min,10) 
+  ' ******* Send to CF - 0 meaning Ring, overwriting old values. Take to 900000 records
+  CardOut (0, 900000)         ' 0= ring, 900000 Records tomamos de CR1000 5.11.19
+                              ' a uno por minuto, 1440 por dia, son 625 dias  
+  'T.1) Temperature internal
+  Sample (1,RefTemp,FP2) 
+  Average (1,RefTemp,FP2,False)
+  'T.2) ***** Define Battery voltage..
+  Minimum(1,BattV,FP2,False,False)      ' Add battery minimum
+  Average(1,BattV,FP2,False)            ' BattV average
+  'T.3) vSensor Samples of all vars added on table
+  'Sample(1, VWDIR, FP2)                 ' Add WDIR sample
+  'Sample(1, Frec_NRG, FP2)              ' Add f_NRG Anem sample
+  Sample(1, VBat_In, FP2)                ' Add Vbat Sensor sample
+  Sample(1, VIae_In, FP2)                ' Add VIae Sensor sample  
+  Sample(1, VIFV_In, FP2)                ' Add VIFV_In Sensor sample  
+
+'  Not yet-  Veleta - v1F
+'  Average (1,EU_VWDIR, FP2, False)
+'  Maximum(1,EU_VWDIR,FP2,False,True)
+'  Minimum(1,EU_VWDIR,FP2,False,False)
+'  StdDev(1,EU_VWDIR,FP2,False)
+'
+'  ' AnemViento NRG   
+'  Average (1,EU_WSpd, FP2, False)
+'  Maximum(1,EU_WSpd,FP2,False,True)
+'  Minimum(1,EU_WSpd,FP2,False,False)
+'  StdDev(1,EU_WSpd,FP2,False)
+  
+  ' EU_VBat
+  Average (1,EU_VBat, FP2, False)
+  Maximum(1,EU_VBat,FP2,False,True)
+  Minimum(1,EU_VBat,FP2,False,False)
+  StdDev(1,EU_VBat,FP2,False)
+  
+  ' EU_Iae_In  
+  Average (1,EU_Iae_In, FP2, False)
+  Maximum(1,EU_Iae_In,FP2,False,True)
+  Minimum(1,EU_Iae_In,FP2,False,False)
+  StdDev(1,EU_Iae_In,FP2,False)
+  
+  ' EU_IFV_In 
+  Average (1,EU_IFV_In, FP2, False)
+  Maximum(1,EU_IFV_In,FP2,False,True)
+  Minimum(1,EU_IFV_In,FP2,False,False)
+  StdDev(1,EU_IFV_In,FP2,False) 
+EndTable 
+ 
+'Default HTML Page 
+WebPageBegin ("default.html",Commands) 
+  HTTPOut("<html>") 
+  HTTPOut ("<style>body {background-color: oldlace}</style>") 
+  HTTPOut ("<body><title>UNPA-UARG EolicoFV Campus CR1000 Datalogger </title>") 
+  HTTPOut ("<h2>Bienvenido a UNPA UARG EolicoFV Campus (v05.11.19 - ModbusTCP reales):</h2>") 
+  HTTPOut ("<tr><td style="+ CHR(34) +"width: 290px"+ CHR(34) +">") 
+  HTTPOut ("<a href="+ CHR(34) +"http://www.campbellsci.com"+ CHR(34) +">") 
+  HTTPOut("<img src="+ CHR(34) +"/CPU/UNPALOGO.jpg"+ CHR(34) + "width="+ CHR(34) +"128"+CHR(34)+"height="+CHR(34)+"155"+ CHR(34) + "class="+ CHR(34) +"style1"+ CHR(34) + "/></a></td>") 
+  HTTPOut ("<p><h2> Datos Actuales:</h2></p>") 
+  HTTPOut ("<p>Hora: " + Time(4) + ":" + Minutes + ":" + Seconds + "</p>") 
+  HTTPOut ("<p>Temperatura: " + Temperature + "</p>") 
+  HTTPOut ("<p><h2> Links:</h2></p>") 
+  HTTPOut ("<p><a href="+ CHR(34) +"monitor.html"+ CHR(34)+">Monitor</a></p>") 
+  HTTPOut ("</body>") 
+  HTTPOut ("</html>") 
+WebPageEnd 
+ 
+'Monitor Web Page 
+WebPageBegin("monitor.html",Commands) 
+  HTTPOut("<html>") 
+  HTTPOut ("<style>body {background-color: oldlace}</style>") 
+  HTTPOut("<body>") 
+  HTTPOut("<title>Monitoreo de Tablas CR1000 </title>") 
+  HTTPOut("<p><h2>CR1000 Enlaces de Tablas</h2></p>") 
+  HTTPOut("<p><a href="+ CHR(34) + "command=TableDisplay&table=CR1Temp&records=10"+ CHR(34)+">Muestra 10 ultimos registros CR1Temp</a></p>") 
+  HTTPOut("<p><a href="+ CHR(34) + "command=NewestRecord&table=CR1Temp"+ CHR(34) + ">Registro actual de tabla CR1Temp</a></p>")
+  HTTPOut("<p><a href="+ CHR(34) + "command=NewestRecord&table=Public"+ CHR(34)+">Registro actual de Public Table</a></p>") 
+  HTTPOut("<p><a href="+ CHR(34) + "command=NewestRecord&table=Status"+ CHR(34)+"> Registro actual de Status Table</a></p>") 
+  HTTPOut("<br><p><a href="+ CHR(34) +"default.html"+CHR(34)+">Regreso a Home Page</a></p>") 
+  HTTPOut("</body>") 
+  HTTPOut("</html>") 
+WebPageEnd 
+ 
+BeginProg 
+  
+  ' 24.10.2019 Modbus Slave on TCP port 502 - MBRegs(1-15)
+  ModbusSlave (502,115200,1,MBReg(),MBCoil(),2)
+  Scan (1,Sec,3,0) 
+    PanelTemp (RefTemp,250) 
+    Battery(BattV)
+    RealTime (Time()) 
+    Minutes=FormatFloat (Time(5),"%02.0f") 
+    Seconds=FormatFloat (Time(6),"%02.0f") 
+    Temperature=FormatFloat(RefTemp, "%02.02f")
+   
+'' 1.a.3) EU_VBat  = VBat_In*G_Vbat_IN+K_Vbat_IN
+''     SE3  Vin_Iae Vbat channel for 24V 
+'Const G_Vbat_IN = 8.00      ' Gain SE3 VinIae Typical - to be calibrated
+'Const K_Vbat_IN = 0.0       ' CalibOffset SE3 Reading
+'' 1.a.4) EU_Iae_In  = VIae_In*G_Iae_In+K__Iae_In
+''    SE4  ACS755 to Vin_Iae IAE channel for ACS755
+'Const G_Iae_In = 16.938  ' Gain SE4 Use SISMRG Calibration ACS755-U050 09-2014
+'Const K_Iae_In = -9.9919 ' CalibOffset SE4 Reading 3.9.2014
+'' 1.a.5) EU_IFV_In  = VIFV_In*G_IFV_IN+K_FV_IN
+''    SE5 ACS713 SJ24 con ELC020A 
+'Const G_IFV_IN = 5.5265904     ' Gain SE5 Reading, Calib SJ24 5.11.19 ver XLS
+'Const K_IFV_IN = -2.8275081    ' Calib Offset SE5 Reading Work_LyR/2019
+
+    ' III.3) VBAT (on SE3, with 0-5V output)
+    ' Vbat -  SE3 Reading 
+    ' Single-Ended Voltage measurement of Vbat correct to 3 
+    ' VoltSE( Dest,Reps,Range,SEChannel,MeasOFF,SettT,Integ,Mult,Offset)
+    VoltSe(VBat_In,1,mV5000,3,False,0,_50Hz,1.0,0.0)
+    ' Calculate in EU - VBAT
+    ' EU_VBat  = VBat_In*G_Vbat_IN+K_Vbat_IN
+    EU_VBat = (VBat_In/1000.0)*G_Vbat_IN + K_Vbat_IN 
+    
+    ' III.4) VIae_In(on SE4, with 0-5V output)
+    ' Public VIae_In SE4 Reading, ACS755 
+    ' VoltSE( Dest,Reps,Range,SEChannel,MeasOFF,SettT,Integ,Mult,Offset)
+    VoltSe(VIae_In,1,mV5000,4,False,0,_50Hz,1.0,0.0)
+    ' Calculate in EU - EU_Iae_In  = VIae_In*G_Iae_In+K__Iae_In
+    EU_Iae_In = (VIae_In/1000.0)*G_Iae_In + K_Iae_In
+    
+
+    ' III.5)  I_FV (on SE5, with 0-5V output)
+    '    SE5 ACS713 SJ24 con ELC020A 
+    'Const G_IFV_IN = 5.5265904     ' Gain SE5 Reading, Calib SJ24 5.11.19 ver XLS
+    'Const K_IFV_IN = -2.8275081    ' Calib Offset SE5 Reading Work_LyR/2019
+    ' VoltSE( Dest,Reps,Range,SEChannel,MeasOFF,SettT,Integ,Mult,Offset)
+    VoltSe(VIFV_In,1,mV5000,5,False,0,_50Hz,1.0,0.0)
+    ' Calculate in EU - V_IN_AC, v1D scale to V
+    ' EU_IFV_In  = VIFV_In*G_IFV_IN+K_FV_IN
+    EU_IFV_In = (VIFV_In/1000.0)*G_IFV_IN + K_IFV_IN
+
+   ' Modbus copy values..
+      'Units EU_WSpd = m/s      ' MB_Ch1 WSpeed Reading, Anem NRG#40C 0-70m/s
+     MBReg(1) = 0 
+    'Units EU_VWDIR = deg     ' MB_Ch2 WDIR Reading, VAne NRG200P 0-359 deg
+     MBReg(2) = MBReg(2)+0.2
+    'Units Volts -  MB_Ch3 Vbat
+     MBReg(3) = EU_VBat 
+    'Units A  MB_Ch4 Iae From Wind generator
+     MBReg(4) = EU_Iae_In 
+    'Units A  MB_Ch5 I_FV 0-20A 
+     MBReg(5) = EU_IFV_In  
+    'Units EU_VHVdc = V       ' MB_Ch6 V_DC DC link [0-600V]
+     MBReg(6) = 546.7    
+    'Units EU_IaeDC = A       ' MB_Ch7 I_DC DC link [0-20A]
+     MBReg(7) = 5.3    
+    'Units V_AC_Out= V        ' MB_Ch8 V_AC_L1N out
+     MBReg(8) = 221.2    
+    'Units I_AC_Out= A        ' MB_Ch9 I_AC_out
+     MBReg(9) = 2.1    
+    'Units P_AC_Out= kW       ' MB_Ch10 P_AC_out active
+     MBReg(10) = 0.45    
+    'Units f_AC_Out= Hz       ' MB_Ch11 f_AC_out
+     MBReg(11) = 50.2    
+    'Units BattV= V           ' MB_Ch13 V_Bat interna 0-15V
+     MBREG(12) = 1            ' Status
+     MBReg(13) = BattV    
+    'Units PTemp= Deg C       ' MB_Ch14 Internal Temp C    
+     MBReg(14) = RefTemp
+ 
+    CallTable (CR1Temp) 
+  NextScan 
+EndProg 

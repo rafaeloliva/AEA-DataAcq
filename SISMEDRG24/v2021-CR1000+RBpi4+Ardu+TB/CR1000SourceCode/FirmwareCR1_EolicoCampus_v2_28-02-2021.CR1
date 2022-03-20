@@ -1,0 +1,522 @@
+'CR1000 Series Datalogger
+'Firmware Campus UNPA-UARG rev 2-2021
+'Based on Mods R.Oliva 14-10-2019
+'         25-10-2019 - Add Modbus TCP test access
+'         28-02-2021 - Add Thies WindSensors & RBPi access
+' Campus Uarg-Eolico Eolux 1200-24, 200Wp Paneles Solartec
+'    Bat 4x Trojan L16G
+' *******************************************
+'v1- 05.11.2019 Add Channels - Initial
+' Hardw.ch - Magnitude
+'    SE3 - Vbat
+'    SE4 - Iae
+'    SE5 - I_fv
+' ****************************************************
+'v2- 28.02.2021 Add Channels and start
+' effective modbus TCP reading on port 502
+'a) Wind measure
+' Hardw.ch - Magnitude (Raw) ----------ModbusCh()---FloatVariable[rng]
+'    P1  - Wind Thies (P1) pulse 0-5V --- CH1------EU_WSpd [0-100 m/s]
+'    SE1 - WDIR Thies Pot 10K ----------- CH2------EU_VWDIR [0-360 deg]
+' -- continuan 02.21 - no changes
+'    SE3 - Vbat 0-5V -------------------- CH3------EU_VBat [0-30 Vdc]
+'    SE4 - Iae 0-5V  -------------------- CH4------EU_Iae_In [0-50 A]
+'    SE5 - I_fv 0-5V -------------------- CH5------EU_IFV_In [0-20 A]
+' -- nuevos 02.21
+'    SE6 - Vo_VAC 0-5V -------------------CH6------EU_VACout [0-300Vrms]
+'    SE7 - Io_IAC 0-5V -------------------CH7------EU_IACout [0-15 Arms]
+'    SE8 - V_RPM  0-5V -------------------CH8------EU_RPM [0-1000 RPM]
+'    SE9 - V_IBAT 0-5V (2.5V=0)-----------CH9------EU_IBAT [+/-100 A]
+'    SE10 -VbatHalf(medio) 0-5V  -----------CH10-----EU_VBat12 [0-20Vdc]
+' ***** To replace FST600 (only 0degC minimum)
+'    TC1047 VOUT = (10 mV/°C) (Temperature °C) + 500 mV, +5V supply
+'    SE2 - V_ExtTemp 0-2V   ------------- CH11-----EU_TEMP [-30 to +100degC]
+
+' 1. Declare Constants, Variables and Units
+' 1.a)  Analog or Pulse Sensor Reading Constants
+'       In general EU_xx = V_xx*G_xx + K_xx
+' 1.a.1) EU_VWSpd = Freq_Thies*G_FreqThies+K_FreqThies Thies FC S/N:08154466
+' Certificate Calib SOH Eng 1.11.17 - Nr 17.US1.10057
+Const G_FreqThies = 0.04664   ' CalibG constant P1 Reading, ThiesFC S/N:08154466
+Const K_FreqThies = 0.24116   ' CalibOffset P1 Reading, ThiesFC S/N:08154466
+' 1.a.2) EU_VWDIR = VWDIR*G_VWDIR+K_VWDIR
+Const G_VWDIR = 71.8   ' Gain SE1 Reading, VAne ThiesFClass Pot10k  Vx1=5V
+Const K_VWDIR = 0.0    ' Offset SE1 Reading, VAne ThiesFClass Pot10k  Vx1=5V
+' 1.a.1) EU_WDIR to be added
+' 1.a.2) EU_TEMP to be added
+' 1.a.3) EU_VBat  = VBat_In*G_Vbat_IN+K_Vbat_IN
+'     SE3  Vin_Iae Vbat channel for 24V
+Const G_Vbat_IN = 8.00      ' Gain SE3 VinIae Typical - to be calibrated
+Const K_Vbat_IN = 0.0       ' CalibOffset SE3 Reading
+' 1.a.4) EU_Iae_In  = VIae_In*G_Iae_In+K__Iae_In
+'    SE4  ACS755 to Vin_Iae IAE channel for ACS755
+Const G_Iae_In = 16.938  ' Gain SE4 Use SISMRG Calibration ACS755-U050 09-2014
+Const K_Iae_In = -9.9919 ' CalibOffset SE4 Reading 3.9.2014
+' 1.a.5) EU_IFV_In  = VIFV_In*G_IFV_IN+K_FV_IN
+'    SE5 ACS713 SJ24 con ELC020A
+Const G_IFV_IN = 5.5265904     ' Gain SE5 Reading, Calib SJ24 5.11.19 ver XLS
+Const K_IFV_IN = -2.8275081    ' Calib Offset SE5 Reading Work_LyR/2019
+
+' -- nuevos 02.21
+'    SE6 - Vo_VAC 0-5V -------------------CH6------EU_VACout [0-300Vrms]
+'    SE7 - Io_IAC 0-5V -------------------CH7------EU_IACout [0-15 Arms]
+'    SE8 - V_RPM  0-5V -------------------CH8------EU_RPM [0-1000 RPM]
+'    SE9 - V_IBAT 0-5V (2.5V=0)-----------CH9------EU_IBAT [+/-100 A]
+'    SE10 -VbatHalf(medio) 0-5V  -----------CH10-----EU_VBat12 [0-20Vdc]
+' 1.a.6) EU_VAC_Out  = Vo_VAC*G_Vo_AC+K_Vo_AC (0-300Vrms)
+'    SE6 1/2 M1B with LEM LV20 - CH6 modbus
+Const G_Vo_AC = 1.00           ' Gain SE6 Reading, to be det. 10.3.21
+Const K_Vo_AC = 0.00           ' Calib Offset SE6  to be det. 10.3.21
+' 1.a.7) EU_IAC_Out  = Vo_IAC*G_Io_AC+K_Io_AC  (0-30 Arms)
+'    SE7 1/2 M1B with ACS712 - CH7 modbus
+Const G_Io_AC = 1.00           ' Gain SE7 Reading, to be det. 10.3.21
+Const K_Io_AC = 0.00           ' Calib Offset SE7  to be det. 10.3.21
+' 1.a.8) EU_RPM  = V_RPM*G_RPM+K_RPM  (0-1000 RPM)
+'    SE8 f2V L&RIng sensor  - CH8 modbus
+Const G_RPM = 1.00           ' Gain SE8 Reading, to be det. 10.3.21
+Const K_RPM = 0.00           ' Calib Offset SE8  to be det. 10.3.21
+' 1.a.9) EU_IBAT = V_IBAT*G_IBAT+K_IBAT  (+100/-100.0 A)
+'    SE9 ACS752 board with ACS754 bidirect 100 A, offset 2.5  - CH9 modbus
+Const G_IBAT = 1.00           ' Gain SE9 Reading, to be det. 10.3.21
+Const K_IBAT = 0.00           ' Calib Offset SE9  to be det. 10.3.21
+' 1.a.10) EU_VBat12 = VbatHalf*G_VBATHalf+K_VBATHalf  
+' Public VbatHalf - SE10 0-5V -- midpoint of 24V batt_bank (0-20V) - CH10 modbus
+Const G_VBATHalf = 1.00        ' Gain SE10 Reading, to be det. 10.3.21
+Const K_VBATHalf = 0.00        ' Calib Offset SE10  to be det. 10.3.21
+' 1.a.11) EU_TEMP = V_ExtTemp*G_TEMP+K_TEMP  
+' Public V_ExtTemp  - SE2 TC1047 Temperature sensor 0-1.75V, 5V supply -CH11 modbus
+Const G_TEMP = 1.00           ' Gain SE11 Reading, to be det. 10.3.21
+Const K_TEMP = 0.00           ' Calib Offset SE11  to be det. 10.3.21
+
+
+Dim Commands As String * 200
+Public Time(9), RefTemp
+Public BattV
+Public Minutes As String, Seconds As String, Temperature As String
+
+' 1.b) Sensor Reading Analog Variables (Float32)
+' 02.21 ***
+Public VWDIR         ' SE1 Reading, VAne ThiesFC Pot10K from VX1 5V
+Public Frec_Thies    ' P1 Opto Freq Reading, ThiesFirstClass
+' 2019 ***
+Public VBat_In       ' SE3 Reading, 0-5V Divider VinIae board
+Public VIae_In       ' SE4 Reading, 0.6-5V ACS755 0-50A HallEf Sensor
+Public VIFV_In       ' SE5 Reading, 0.6-5V ACS713 PV current 0-20A
+' 02.21 ***
+Public Vo_VAC        ' SE6 Reading, M1B Vrms output1 0-5V for 0-270 Vrms
+Public Vo_IAC        ' SE7 Reading, M1B Irms output2 0-5V for 0-20 Arms
+'    SE8 - V_RPM  0-5V -------------------CH8------EU_RPM [0-1000 RPM]
+Public V_RPM         ' SE8 Reading, RPM from f2V sensor L&R 5V
+'    SE9 - V_IBAT 0-5V (2.5V=0)-----------CH9------EU_IBAT [+/-100 A]
+Public V_IBAT        ' SE9 ACS754 bidir(2.5V=0) Battery current [+/-100 A]
+'    SE10 -VbatHalf(medio) 0-5V  -----------CH10-----EU_VBat12 [0-20Vdc]
+Public VbatHalf      ' SE10 0-5V -- middlepoint of 24V batt_bank (0-20V)
+'    SE2 ***** To replace FST600 (only 0degC minimum)
+'    TC1047 VOUT = (10 mV/°C) (Temperature °C) + 500 mV, +5V supply
+'    SE2 - V_ExtTemp 0-2V   ------------- CH11-----EU_TEMP [-30 to +100degC]
+Public V_ExtTemp      ' SE2 TC1047 Temperature sensor 0-1.75V, 5V supply
+
+' 1.c) E.U. (Engineering Units) holders for Analog Variables (Float32)
+' Wind, VAC, IAC, RPM, Temp_Ext added v2 - 02.21
+' Wind Measure
+'    P1  - Wind Thies (P1) pulse 0-5V --- CH1------EU_WSpd [0-100 m/s]
+Public EU_WSpd       ' WSpeed Reading, Anem ThiesFC 0-70m/s 02.21
+'    SE1 - WDIR Thies Pot 10K ----------- CH2------EU_VWDIR [0-360 deg]
+Public EU_VWDIR      ' WDIR Reading, VAne ThiesFC 10K 0-359 deg 02.21
+' From 2019
+Public EU_VBat       ' VBat in EU 0-30Vdc input --- CH3
+Public EU_Iae_In     ' IAer in 0-50A units -------- CH4
+Public EU_IFV_In     ' I_PV in 0-20A units -------- CH5
+' Added 02.21
+'    SE6 - Vo_VAC 0-5V -------------------CH6------EU_VACout [0-300Vrms]
+Public EU_VAC_Out    ' V_AC inverter out in 0-270 Vrms --CH6
+'    SE7 - Io_IAC 0-5V -------------------CH7------EU_IACout [0-15 Arms]
+Public EU_IAC_Out    ' I_AC inverter out in 0-20 Arms  --CH7
+'    SE8 - V_RPM  0-5V -------------------CH8------EU_RPM [0-1000 RPM]
+Public EU_RPM        ' EU_RPM [0-1000 RPM]
+'    SE9 - V_IBAT 0-5V (2.5V=0)-----------CH9------EU_IBAT [+/-100 A]
+Public EU_IBAT       ' EU_IBAT, (-)discharge, (+)charge [+/-100 A]
+'    SE10 -VbatHalf(medio) 0-5V  -----------CH10-----EU_VBat12 [0-20Vdc]
+Public EU_VBat12     ' Middle point Battery voltage
+' ***** To replace FST600 (only 0degC minimum)
+'    TC1047 VOUT = (10 mV/°C) (Temperature °C) + 500 mV, +5V supply
+'    SE2 - V_ExtTemp 0-2V   ------------- CH11-----EU_TEMP [-30 to +100degC]
+Public EU_TEMP       ' external EU_TEMP [-30 to +100degC]
+
+' 1.d) Arduino readings via ModbusMaster, directly in EU Floats
+Public MSDataV(8)
+' 3 Registers - initial Test  (3 elements read)
+Alias  MSDataV(1) = Temp_Inver   ' Temperature Invernadero reading  
+Alias  MSDataV(2) = Humed_Inver  ' Humidity Invernadero reading
+Alias  MSDataV(3) = Status_Inver  ' Status Invernadero reading
+' CommsResult is for ModbusMaster RS485 access result.
+Public CommsResult(5) As Long
+
+
+' Modbus Slave Tables 25.10.19
+Public MBReg(16) As Float
+Public MBCoil(2) As Boolean
+
+' 1.e Units declaration 09.03.21
+Units EU_WSpd = m/s      ' MB_Ch1 WSpeed Reading, Anem NRG#40C 0-70m/s
+Units EU_VWDIR = deg     ' MB_Ch2 WDIR Reading, VAne NRG200P 0-359 deg
+'Units EU_VBat = V        ' VBat in EU 0-30Vdc input --- CH3
+
+'Units EU_IFV_In = A      ' I_PV in 0-20A units -------- CH5
+'    SE6 - Vo_VAC 0-5V -------------------CH6------EU_VACout [0-300Vrms]
+
+' MB_Ch12 Status no Units
+'Units BattV= V           ' MB_Ch13 V_Bat interna 0-15V
+'Units PTemp= Deg C       ' MB_Ch14 Internal Temp C
+
+' Added 24.10.2019 v1C
+' NewWind Aliases
+Alias MBReg(1) = VelocVien   ' CH1 MB_Ch1 WSpeed Reading, Anem ThiesFC 0-70m/s
+Alias MBReg(2) = DirecVien   ' CH2 MB_Ch2 WDIR Reading, VAne ThiesFC 0-359 deg
+' From 2019
+Alias MBReg(3) = VBat_In     ' CH3 MB_Ch3 Vbat in 0-30V dc
+Alias MBReg(4) = VIae_In     ' CH4 MB_Ch4 Corriente Aerogen 0-50A
+Alias MBReg(5) = I_FV_In     ' CH5 MB_Ch5 Corriente FV 0-20A
+' New 02.21
+Alias MBReg(6) = VAC_Out     ' CH6 MB_Ch6 VAC_Out 220V Inverter
+Alias MBReg(7) = IAC_Out     ' CH7 MB_Ch7 IAC_Out 220V Inverter
+Alias MBReg(8) = RPM_Aero    ' CH8 MB_Ch8 -----EU_RPM [0-1000 RPM]
+Alias MBReg(9) = I_BAT       ' CH9 MB_Ch9 Ibateria Bidir [-100/+100 A]
+Alias MBReg(10) = VBat_Med   ' CH10 MB_Ch10 Vpuntomedio-----EU_VBat12 [0-20Vdc]
+Alias MBReg(11) = TempExt    ' CH11 MB_Ch11 TC1047--EU_TEMP [-30 to +100degC]
+Alias MBReg(12) = Status     ' MB_12 No implementado - Status
+Alias MBReg(13) = Vbat12     ' MB_Ch13 Bateria 12V Voltaje
+Alias MBReg(14) = TempInt    ' MB_Ch14 Temperature interior logger
+
+
+DataTable (CR1Temp,True,-1)
+  DataInterval (0,1,Min,10)
+  ' ******* Send to CF - 0 meaning Ring, overwriting old values. Take to 900000 records
+  CardOut (0, 900000)         ' 0= ring, 900000 Records tomamos de CR1000 5.11.19
+  ' a uno por minuto, 1440 por dia, son 625 dias
+  'T.1) Temperature internal
+  Sample (1,RefTemp,FP2)
+  Average (1,RefTemp,FP2,False)
+  'T.2) ***** Define Battery voltage..
+  Minimum(1,BattV,FP2,False,False)      ' Add battery minimum
+  Average(1,BattV,FP2,False)            ' BattV average
+  'T.3) vSensor Samples of all vars added on table
+  Sample(1, VWDIR, FP2)                 ' Add WDIR sample
+  Sample(1, Frec_Thies, FP2)            ' Add f_Thies Anem sample
+  Sample(1, VBat_In, FP2)                ' Add Vbat Sensor sample
+  Sample(1, VIae_In, FP2)                ' Add VIae Sensor sample
+  Sample(1, VIFV_In, FP2)                ' Add VIFV_In Sensor sample
+  Sample(1, Vo_VAC, FP2)                 ' Add Vo_VAC Sensor sample
+  Sample(1, Vo_IAC, FP2)                 ' Add Vo_IAC Sensor sample
+  Sample(1, V_RPM, FP2)                  ' Add V_RPM Sensor sample
+  Sample(1, V_IBAT, FP2)                 ' Add V_IBAT Bidirectional curr. Sensor sample
+  Sample(1, VbatHalf, FP2)               ' Add VbatHalf midpoint voltage Sen sample 
+  Sample(1, V_ExtTemp, FP2)              ' Add ExternalTemp Sensor sample
+
+  ' CH1 AnemViento Thies
+  Average (1,EU_WSpd, FP2, False)
+  Maximum(1,EU_WSpd,FP2,False,True)
+  Minimum(1,EU_WSpd,FP2,False,False)
+  StdDev(1,EU_WSpd,FP2,False)
+  
+  '  CH2 WDIR - VeletaThies 10K  
+  Average (1,EU_VWDIR, FP2, False)
+  Maximum(1,EU_VWDIR,FP2,False,True)
+  Minimum(1,EU_VWDIR,FP2,False,False)
+  StdDev(1,EU_VWDIR,FP2,False)
+  
+  ' CH3 EU_VBat 
+  Average (1,EU_VBat, FP2, False)
+  Maximum(1,EU_VBat,FP2,False,True)
+  Minimum(1,EU_VBat,FP2,False,False)
+  StdDev(1,EU_VBat,FP2,False)
+
+  ' CH4 EU_Iae_In - IAero
+  Average (1,EU_Iae_In, FP2, False)
+  Maximum(1,EU_Iae_In,FP2,False,True)
+  Minimum(1,EU_Iae_In,FP2,False,False)
+  StdDev(1,EU_Iae_In,FP2,False)
+
+  ' CH5 EU_IFV_In
+  Average (1,EU_IFV_In, FP2, False)
+  Maximum(1,EU_IFV_In,FP2,False,True)
+  Minimum(1,EU_IFV_In,FP2,False,False)
+  StdDev(1,EU_IFV_In,FP2,False)
+  
+  ' CH6 EU_VAC_Out
+  ' Average (1,EU_VAC_Out, FP2, False)
+  ' Maximum(1,EU_VAC_Out,FP2,False,True)
+  ' Minimum(1,EU_VAC_Out,FP2,False,False)
+  ' StdDev(1,EU_VAC_Out,FP2,False)
+
+  ' CH7 EU_IAC_Out
+  ' Average (1,EU_IAC_Out, FP2, False)
+  ' Maximum(1,EU_IAC_Out,FP2,False,True)
+  ' Minimum(1,EU_IAC_Out,FP2,False,False)
+  ' StdDev(1,EU_IAC_Out,FP2,False)
+
+  ' CH8 EU_RPM
+  ' Average (1,EU_RPM, FP2, False)
+  ' Maximum(1,EU_RPM,FP2,False,True)
+  ' Minimum(1,EU_RPM,FP2,False,False)
+  ' StdDev(1,EU_RPM,FP2,False)
+
+
+'    SE8 - V_RPM  0-5V -------------------CH8------EU_RPM [0-1000 RPM]
+'Units EU_RPM = RPM        ' EU_RPM [0-1000 RPM]
+'    SE9 - V_IBAT 0-5V (2.5V=0)-----------CH9------EU_IBAT [+/-100 A]
+'Units EU_IBAT = A         ' EU_IBAT, (-)discharge, (+)charge [+/-100 A]
+'    SE10 -VbatHalf(medio) 0-5V  -----------CH10-----EU_VBat12 [0-20Vdc]
+'Units EU_VBat12 = V      ' Middle point Battery voltage
+' ***** To replace FST600 (only 0degC minimum)
+'    TC1047 VOUT = (10 mV/°C) (Temperature °C) + 500 mV, +5V supply
+'    SE2 - V_ExtTemp 0-2V   ------------- CH11-----EU_TEMP [-30 to +100degC]
+'Units EU_TEMP = Deg C    ' external EU_TEMP [-30 to +100degC]
+  
+EndTable
+
+'Default HTML Page
+WebPageBegin ("default.html",Commands)
+  HTTPOut("<html>")
+  HTTPOut ("<style>body {background-color: oldlace}</style>")
+  HTTPOut ("<body><title>UNPA-UARG EolicoFV Campus CR1000 Datalogger </title>")
+  HTTPOut ("<h2>Bienvenido a UNPA UARG EolicoFV Campus (v05.11.19 - ModbusTCP reales):</h2>")
+  HTTPOut ("<tr><td style="+ CHR(34) +"width: 290px"+ CHR(34) +">")
+  HTTPOut ("<a href="+ CHR(34) +"http://www.campbellsci.com"+ CHR(34) +">")
+  HTTPOut("<img src="+ CHR(34) +"/CPU/UNPALOGO.jpg"+ CHR(34) + "width="+ CHR(34) +"128"+CHR(34)+"height="+CHR(34)+"155"+ CHR(34) + "class="+ CHR(34) +"style1"+ CHR(34) + "/></a></td>")
+  HTTPOut ("<p><h2> Datos Actuales:</h2></p>")
+  HTTPOut ("<p>Hora: " + Time(4) + ":" + Minutes + ":" + Seconds + "</p>")
+  HTTPOut ("<p>Temperatura: " + Temperature + "</p>")
+  HTTPOut ("<p><h2> Links:</h2></p>")
+  HTTPOut ("<p><a href="+ CHR(34) +"monitor.html"+ CHR(34)+">Monitor</a></p>")
+  HTTPOut ("</body>")
+  HTTPOut ("</html>")
+WebPageEnd
+
+'Monitor Web Page
+WebPageBegin("monitor.html",Commands)
+  HTTPOut("<html>")
+  HTTPOut ("<style>body {background-color: oldlace}</style>")
+  HTTPOut("<body>")
+  HTTPOut("<title>Monitoreo de Tablas CR1000 </title>")
+  HTTPOut("<p><h2>CR1000 Enlaces de Tablas</h2></p>")
+  HTTPOut("<p><a href="+ CHR(34) + "command=TableDisplay&table=CR1Temp&records=10"+ CHR(34)+">Muestra 10 ultimos registros CR1Temp</a></p>")
+  HTTPOut("<p><a href="+ CHR(34) + "command=NewestRecord&table=CR1Temp"+ CHR(34) + ">Registro actual de tabla CR1Temp</a></p>")
+  HTTPOut("<p><a href="+ CHR(34) + "command=NewestRecord&table=Public"+ CHR(34)+">Registro actual de Public Table</a></p>")
+  HTTPOut("<p><a href="+ CHR(34) + "command=NewestRecord&table=Status"+ CHR(34)+"> Registro actual de Status Table</a></p>")
+  HTTPOut("<br><p><a href="+ CHR(34) +"default.html"+CHR(34)+">Regreso a Home Page</a></p>")
+  HTTPOut("</body>")
+  HTTPOut("</html>")
+WebPageEnd
+
+BeginProg
+
+  ' 24.10.2019 Modbus Slave on TCP port 502 - MBRegs(1-15)
+  ModbusSlave (502,115200,1,MBReg(),MBCoil(),2)
+  '10.3.21 Add Serial Modbus master thru COM1
+  'Open COM1 for communications with the Arduino (same as MetSENS200)
+  'SerialOpen ( ComPort, BaudRate, Format, TXDelay, BufferSize)
+  'Format=0: implies N,8,1; -19200Baud (implies autobaud
+  ' after first try at 19200), 0=TXdelay, 500=RingBuffer
+  ' On CR1000X was SerialOpen(ComC5,19200,2,0,500,4) - 1 more mode parm
+  SerialOpen (COMRS232,-19200,0,0,500)
+  Scan (1,Sec,3,0)
+    PanelTemp (RefTemp,250)
+    Battery(BattV)
+    
+    ' Thies WindVane POT & Anem First Class Sensor measurement
+    ' ExciteV (Vx1,5000,0) --don't work, CR1000 limited to 2500mV
+    ' This works for CR1000X SWVX(VX1,1,1) - Set excitation channel 1 to 5V
+    ' 10.3.21 Connected +Vcc of instruments to 5V with two separate
+    ' resistors 33R 1%, to limit current - Tested & works     
+
+    RealTime (Time())
+    Minutes=FormatFloat (Time(5),"%02.0f")
+    Seconds=FormatFloat (Time(6),"%02.0f")
+    Temperature=FormatFloat(RefTemp, "%02.02f")
+
+    ' III.1) WindVane Measurement..(on SE1, now with 0-5V output)
+    ' Public VWDIR -  SE1 Reading, VAne Thies 10K Pot
+    ' Single-Ended Voltage measurement of wind vane Pot
+    ' m1= 1.0 (5Vrange) b1= 0.0 - See CSI page
+    ' Range aprox. 0 to 5VDC
+    ' VoltSE( Dest,Reps,Range,SEChannel,MeasOFF,SettT,Integ,Mult,Offset)
+    VoltSe(VWDIR,1,mV5000,1,False,0,_50Hz,1.0,0.0)
+    ' Calculate in EU - WDir + Scale mV to V
+    EU_VWDIR = (VWDIR/1000.0)*G_VWDIR + K_VWDIR
+
+    ' III.2) Pulse measurement Thies FC anemometer
+    ' Public Frec_Thies - P1 low voltage Freq Reading
+    ' PulseCount(Dest, Reps, Terminal, PConfig, POption, Mult,Offset)
+    ' Try Frec_NRG variable, 1 rep, P1=Channel 1,
+    '  HF AC= 5 (low level AC) (only on CR6/1000X, in CR1000 should be 1),
+    '  1 (counts) ,Mult = 1 , offset 0
+    PulseCount(Frec_Thies,1,1,0,1,1.0,0.0)
+    ' Calculate in m/s for Thies
+    EU_WSpd = Frec_Thies *G_FreqThies + K_FreqThies
+
+    ' III.3) VBAT (on SE3, with 0-5V output)
+    ' Vbat -  SE3 Reading
+    ' Single-Ended Voltage measurement of Vbat correct to 3
+    ' VoltSE( Dest,Reps,Range,SEChannel,MeasOFF,SettT,Integ,Mult,Offset)
+    VoltSe(VBat_In,1,mV5000,3,False,0,_50Hz,1.0,0.0)
+    ' Calculate in EU - VBAT
+    ' EU_VBat  = VBat_In*G_Vbat_IN+K_Vbat_IN
+    ' Const G_Vbat_IN = 8.00      ' Gain SE3 VinIae Typical - to be calibrated
+    ' Const K_Vbat_IN = 0.0       ' CalibOffset SE3 Reading
+    EU_VBat = (VBat_In/1000.0)*G_Vbat_IN + K_Vbat_IN
+
+    ' III.4) VIae_In(on SE4, with 0-5V output)
+    ' Public VIae_In SE4 Reading, ACS755
+    ' VoltSE( Dest,Reps,Range,SEChannel,MeasOFF,SettT,Integ,Mult,Offset)
+    VoltSe(VIae_In,1,mV5000,4,False,0,_50Hz,1.0,0.0)
+    ' Calculate in EU - EU_Iae_In  = VIae_In*G_Iae_In+K__Iae_In
+    'Const G_Iae_In = 16.938  ' Gain SE4 Use SISMRG Calibration ACS755-U050 09-2014
+    'Const K_Iae_In = -9.9919 ' CalibOffset SE4 Reading 3.9.2014
+    EU_Iae_In = (VIae_In/1000.0)*G_Iae_In + K_Iae_In
+
+    ' III.5)  I_FV (on SE5, with 0-5V output)
+    '    SE5 ACS713 SJ24 con ELC020A
+    ' Const G_IFV_IN = 5.5265904     ' Gain SE5 Reading, Calib SJ24 5.11.19 ver XLS
+    ' Const K_IFV_IN = -2.8275081    ' Calib Offset SE5 Reading Work_LyR/2019
+    ' VoltSE( Dest,Reps,Range,SEChannel,MeasOFF,SettT,Integ,Mult,Offset)
+    VoltSe(VIFV_In,1,mV5000,5,False,0,_50Hz,1.0,0.0)
+    ' Calculate in EU - V_IN_AC, v1D scale to V
+    ' EU_IFV_In  = VIFV_In*G_IFV_IN+K_FV_IN
+    EU_IFV_In = (VIFV_In/1000.0)*G_IFV_IN + K_IFV_IN
+
+    ' III.6) EU_VAC_Out  = Vo_VAC*G_Vo_AC+K_Vo_AC (0-300Vrms)
+    '    SE6 1/2 M1B with LEM LV20
+    ' Const G_Vo_AC = 1.00           ' Gain SE6 Reading, to be det. 10.3.21
+    ' Const K_Vo_AC = 0.00           ' Calib Offset SE6  to be det. 10.3.21
+    ' VoltSE( Dest,Reps,Range,SEChannel,MeasOFF,SettT,Integ,Mult,Offset)
+    VoltSe(Vo_VAC,1,mV5000,6,False,0,_50Hz,1.0,0.0)
+    ' EU_VAC_Out  = Vo_VAC*G_Vo_AC+K_Vo_AC
+    EU_VAC_Out  = (Vo_VAC/1000.0)*G_Vo_AC+K_Vo_AC
+    
+    ' III.7) EU_IAC_Out  = Vo_IAC*G_Io_AC+K_Io_AC  (0-30 Arms)
+    '    SE7 1/2 M1B with ACS712
+    ' Const G_Io_AC = 1.00           ' Gain SE7 Reading, to be det. 10.3.21
+    ' Const K_Io_AC = 0.00           ' Calib Offset SE7  to be det. 10.3.21
+    ' VoltSE( Dest,Reps,Range,SEChannel,MeasOFF,SettT,Integ,Mult,Offset)
+    VoltSe(Vo_IAC,1,mV5000,7,False,0,_50Hz,1.0,0.0)
+    ' EU_IAC_Out  = Vo_IAC*G_Io_AC+K_Io_AC
+    EU_IAC_Out  = (Vo_IAC/1000.0)*G_Io_AC+K_Io_AC
+
+    ' III.8) EU_RPM  = V_RPM*G_RPM+K_RPM  (0-1000 RPM)
+    '    SE8 f2V L&RIng sensor
+    ' Const G_RPM = 1.00           ' Gain SE8 Reading, to be det. 10.3.21
+    ' Const K_RPM = 0.00           ' Calib Offset SE8  to be det. 10.3.21
+    ' VoltSE( Dest,Reps,Range,SEChannel,MeasOFF,SettT,Integ,Mult,Offset)
+    VoltSe(V_RPM,1,mV5000,8,False,0,_50Hz,1.0,0.0)
+    ' EU_RPM  = V_RPM*G_RPM+K_RPM  (0-1000 RPM)
+    EU_RPM  = (V_RPM/1000.0)*G_RPM+K_RPM
+    
+    ' III.9) EU_IBAT = V_IBAT*G_IBAT+K_IBAT  (+100/-100.0 A)
+    '    SE9 ACS752 board with ACS754 bidirect 100 A, offset 2.5
+    ' Const G_IBAT = 1.00           ' Gain SE9 Reading, to be det. 10.3.21
+    ' Const K_IBAT = 0.00           ' Calib Offset SE9  to be det. 10.3.21
+    ' VoltSE( Dest,Reps,Range,SEChannel,MeasOFF,SettT,Integ,Mult,Offset)
+    VoltSe(V_IBAT,1,mV5000,9,False,0,_50Hz,1.0,0.0)
+    ' EU_IBAT = V_IBAT*G_IBAT+K_IBAT  (+100/-100.0 A)
+    EU_IBAT  = (V_IBAT/1000.0)*G_IBAT+K_IBAT
+
+    ' III.10)EU_VBATHalf = VbatHalf*G_VBATHalf+K_VBATHalf  (0-20V)
+    '    SE10 0-5V -- midpoint of 24V batt_bank (0-20V) - CH10 modbus
+    ' Const G_VBATHalf = 1.00        ' Gain SE10 Reading, to be det. 10.3.21
+    ' Const K_VBATHalf = 0.00        ' Calib Offset SE10  to be det. 10.3.21
+    ' VoltSE( Dest,Reps,Range,SEChannel,MeasOFF,SettT,Integ,Mult,Offset)
+    VoltSe(VbatHalf,1,mV5000,10,False,0,_50Hz,1.0,0.0)
+    ' EU_VBATHalf = VbatHalf*G_VBATHalf+K_VBATHalf
+    EU_VBat12 = (VbatHalf/1000.0)*G_VBATHalf+K_VBATHalf
+
+    ' III.11) EU_TEMP = V_ExtTemp*G_TEMP+K_TEMP  (-40/+60 degC)
+    '    SE2 TC1047 Temperature sensor 0-1.75V, 5V supply -CH11 modbus
+    ' Const G_TEMP = 1.00           ' Gain SE2 Reading, to be det. 10.3.21
+    ' Const K_TEMP = 0.00           ' Calib Offset SE2  to be det. 10.3.21
+    VoltSe(V_ExtTemp,1,mV2500,2,False,0,_50Hz,1.0,0.0)
+    ' EU_TEMP = V_ExtTemp*G_TEMP+K_TEMP
+    EU_TEMP = (V_ExtTemp/1000.0)*G_TEMP+K_TEMP
+    
+    ' IV) Modbus RS485 access to Arduino
+    ' Poll Modbus registers
+    ' ModbusMaster ( ResultCode, ComPort, BaudRate, ModbusAddr, Function, Variable,
+    '    Start, Length, Tries, TimeOut, [ModbusOption] )
+    ' Baud=19200, MBAddrr=1, Function=3 ReadHR,
+    ' Separate in 3 reads, registers are separated in many addresses
+    ' MSDataV() is the variable,
+    ' StartAddr = 1 for Temp_Inver=Alias  MSDataV(1) = Temp_Inver   ' Temperature Invernadero reading  
+    '               MSDataV(2) = Humed_Inver   ' Humidity Invernadero reading
+    '               MSDataV(3) = Status_Inver  ' Status Invernadero reading
+    ' Read 3 Floats, make 3 tries, wait 100*0.01s= 1 sec,
+    ' [modbusoption] = 2 Float 32bit ABCD reads ok 7.10.19
+    '             Result    Comport,Baud,MBadd,Fctn,Var,StartAd,Len,tries,Wait,Opt
+    'ModbusMaster (CommsResult(1),COMRS232,19200,1,3,MSDataV(),1,3,3,100,2)
+    ModbusMaster (CommsResult(1),COMRS232,-19200,1,3,MSDataV(),1,3,3,100,2)
+    
+
+
+
+    ' Modbus copy values..
+    'Units EU_WSpd = m/s      ' MB_Ch1 WSpeed Reading, Thies FirstClass 0-100m/s
+    MBReg(1) = EU_WSpd
+
+    'Units EU_VWDIR = deg     ' MB_Ch2 WDIR Reading, ThiesWindVane FC 10K Pot 0-359 deg
+    MBReg(2) = EU_VWDIR
+
+    'Units Volts -  MB_Ch3 Vbat
+    MBReg(3) = EU_VBat
+
+    'Units A  MB_Ch4 Iae From Wind generator
+    MBReg(4) = EU_Iae_In
+
+    'Units A  MB_Ch5 I_FV 0-20A
+    MBReg(5) = EU_IFV_In
+
+    ' CH6 Units EU_VAC_Out = Vrms  V_AC inverter out in 0-270 Vrms
+    MBReg(6) = EU_VAC_Out
+
+    ' CH7 Units EU_IAC_Out = Arms   ' I_AC inverter out in 0-20 Arms  --CH7
+    MBReg(7) = EU_IAC_Out
+
+    ' CH8 - V_RPM  0-5V -----CH8------EU_RPM [0-1000 RPM]
+    'Units EU_RPM = RPM        ' EU_RPM [0-1000 RPM]
+    MBReg(8) = EU_RPM
+    
+    ' CH9 - V_IBAT 0-5V (2.5V=0)-----------CH9------EU_IBAT [+/-100 A]
+    ' Units EU_IBAT = A  - EU_IBAT, (-)discharge, (+)charge [+/-100 A]
+    MBReg(9) = EU_IBAT
+    
+    ' CH10 - SE10 -VbatHalf(medio) 0-5V-----EU_VBat12 [0-20Vdc]
+    ' Units EU_VBat12 = V      ' Middle point Battery voltage
+    MBReg(10) = EU_VBat12
+
+    ' CH11 ***** To replace FST600 (only 0degC minimum)
+    ' TC1047 VOUT = (10 mV/°C) (Temperature °C) + 500 mV, +5V supply
+    ' SE2 - V_ExtTemp 0-2V   ------------- CH11-----EU_TEMP [-30 to +100degC]
+    ' Units EU_TEMP = Deg C    ' external EU_TEMP [-30 to +100degC]
+    MBReg(11) = EU_TEMP
+    
+    ' Leido del controlador invernadero Arduino (esclavo ModbusRTU RS485)     
+    '               MSDataV(1) = Temp_Inver (CH15)   ' Temperatura invernadero
+    '               MSDataV(2) = Humed_Inver (CH16)  ' Humidity Invernadero reading
+    '               MSDataV(3) = Status_Inver (CH12)  ' Status Invernadero reading
+
+    MBReg(12) = Status_Inver  ' Status read from Arduino
+
+    'Units BattV= V           ' MB_Ch13 V_Bat interna 0-15V
+    MBReg(13) = BattV
+
+    'Units PTemp= Deg C       ' MB_Ch14 Internal Temp C
+    MBReg(14) = RefTemp
+
+    ' Temp - controlador invernadero Arduino (esclavo ModbusRTU RS485)     
+    MBReg(15) = Temp_Inver  ' Temperatura invernadero read from Arduino
+    
+    ' Humed - controlador invernadero Arduino (esclavo ModbusRTU RS485)     
+    MBReg(16) = Humed_Inver  ' Temperatura invernadero read from Arduino
+
+
+    CallTable (CR1Temp)
+  NextScan
+EndProg
